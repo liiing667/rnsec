@@ -11,6 +11,7 @@ import { resolveAndroidTargetSdk } from '../utils/androidSdk.js';
 import { languageForPath } from '../utils/nativeCode.js';
 import { collectNativeDevOnlyRanges } from '../utils/nativeGuards.js';
 import { parseSuppressions, isSuppressed } from '../utils/suppression.js';
+import type { SuppressionMap } from '../utils/suppression.js';
 
 /**
  * Rules that describe the same underlying problem from different angles. When
@@ -61,6 +62,8 @@ export class RuleEngine {
   private suppressedCount: number = 0;
   private projectInfo: ProjectInfo | undefined;
   private respectGitignore = true;
+  /** One parsed suppression map per file for the whole scan, shared by file rules and finalize hooks. */
+  private suppressionCache = new Map<string, SuppressionMap | null>();
 
   /**
    * Skip files that git ignores (default true). Tracked files are always scanned.
@@ -133,6 +136,7 @@ export class RuleEngine {
     const allFindings: Finding[] = [];
     this.skippedFiles = 0;
     this.suppressedCount = 0;
+    this.suppressionCache = new Map();
     this.rootDir = rootDir ? resolve(rootDir) : undefined;
     this.projectInfo = await this.loadProjectInfo();
     this.beginScan();
@@ -174,7 +178,6 @@ export class RuleEngine {
   /** Run every rule's `finalize` hook; findings with file + line honour `rnsec-ignore` in that file. */
   private async finalizeRules(): Promise<Finding[]> {
     const out: Finding[] = [];
-    const suppressionCache = new Map<string, ReturnType<typeof parseSuppressions> | null>();
     for (const rule of this.getAllRules()) {
       if (!rule.finalize) continue;
       let findings: Finding[] = [];
@@ -187,13 +190,7 @@ export class RuleEngine {
       }
       for (const finding of findings) {
         if (finding.filePath && finding.line !== undefined) {
-          if (!suppressionCache.has(finding.filePath)) {
-            suppressionCache.set(
-              finding.filePath,
-              await readFileContent(finding.filePath).then(parseSuppressions, () => null)
-            );
-          }
-          const map = suppressionCache.get(finding.filePath);
+          const map = await this.getSuppressionMap(finding.filePath);
           if (map && isSuppressed(map, finding.ruleId, finding.line)) {
             this.suppressedCount++;
             continue;
@@ -205,6 +202,23 @@ export class RuleEngine {
     return out;
   }
 
+  /** Parse (once per file per scan) the `rnsec-ignore` comments of a file; null when it cannot be read. */
+  private async getSuppressionMap(filePath: string): Promise<ReturnType<typeof parseSuppressions> | null> {
+    if (!this.suppressionCache.has(filePath)) {
+      this.suppressionCache.set(
+        filePath,
+        await readFileContent(filePath).then(content => parseSuppressions(content, filePath), () => null)
+      );
+    }
+    return this.suppressionCache.get(filePath) ?? null;
+  }
+
+  /** Cache the map parsed from content the engine already read, so finalize reuses the exact same result. */
+  private cacheSuppressionMap(filePath: string, content: string): ReturnType<typeof parseSuppressions> {
+    const map = parseSuppressions(content, filePath);
+    this.suppressionCache.set(filePath, map);
+    return map;
+  }
 
   /**
    * Run all registered rules on a project
@@ -219,6 +233,7 @@ export class RuleEngine {
     const allFindings: Finding[] = [];
     this.skippedFiles = 0;
     this.suppressedCount = 0;
+    this.suppressionCache = new Map();
     this.rootDir = resolve(rootDir);
     this.projectInfo = await this.loadProjectInfo();
     this.beginScan();
@@ -321,7 +336,7 @@ export class RuleEngine {
     const devRanges = context.language
       ? collectNativeDevOnlyRanges(fileContent, context.language)
       : collectDevOnlyRanges(context.ast);
-    const suppressions = parseSuppressions(fileContent);
+    const suppressions = this.suppressionCache.get(context.filePath) ?? this.cacheSuppressionMap(context.filePath, fileContent);
 
     return findings.filter(finding => {
       // path-level, for every rule: findings in tests, vendored code and Android debug source sets never ship

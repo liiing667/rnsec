@@ -5,7 +5,47 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { isNonAppSourcePath, isGeneratedBundlePath, isGeneratedBundleContent } from '../dist/utils/pathFilters.js';
 import { RuleEngine } from '../dist/core/ruleEngine.js';
+import { parseSuppressions, isSuppressed } from '../dist/utils/suppression.js';
 import { gitProject } from './helpers.mjs';
+
+test('parseSuppressions: only real comment boundaries suppress, and only with explicit rule IDs', () => {
+  const lines = (content, file) =>
+    [...parseSuppressions(content, file).byLine.entries()].map(([line, ids]) => [line, [...ids].sort()]);
+
+  // standalone line/block comments reach the next line; trailing comments do not
+  assert.deepEqual(lines('// rnsec-ignore: A\ncode();\n', 'a.ts'), [[1, ['A']], [2, ['A']]]);
+  assert.deepEqual(lines('code(); // rnsec-ignore: A\n', 'a.ts'), [[1, ['A']]]);
+  assert.deepEqual(lines('/* rnsec-ignore: A */\ncode();\n', 'a.ts'), [[1, ['A']], [2, ['A']]]);
+  assert.deepEqual(lines('code(); /* rnsec-ignore: A */\nnext();\n', 'a.ts'), [[1, ['A']]]);
+
+  // strings and template literals are code, not comments
+  assert.deepEqual(lines("const s = '// rnsec-ignore: A';\ncode();\n", 'a.ts'), []);
+  assert.deepEqual(lines('const t = `// rnsec-ignore: A`;\ncode();\n', 'a.ts'), []);
+  assert.deepEqual(lines('const t = `\n// rnsec-ignore: A\n`;\ncode();\n', 'a.ts'), []);
+  assert.deepEqual(lines('const t = `// rnsec-ignore: A`; // rnsec-ignore: B\ncode();\n', 'a.ts'), [[1, ['B']]]);
+  assert.deepEqual(lines('const t = `// rnsec-ignore: A`;\n// rnsec-ignore: B\ncode();\n', 'a.ts'), [[2, ['B']], [3, ['B']]]);
+
+  // multi-line block comments cover only their own lines, never past the closing delimiter
+  const block = parseSuppressions('a();\n/* rnsec-ignore: A\nx\n*/\ncode();\n', 'a.ts');
+  assert.ok(isSuppressed(block, 'A', 2) && isSuppressed(block, 'A', 3) && isSuppressed(block, 'A', 4));
+  assert.ok(!isSuppressed(block, 'A', 5));
+
+  // # comments work in config files but directive-shaped text in quoted values does not
+  assert.deepEqual(lines('# rnsec-ignore: A\nx=1\n', '.env'), [[1, ['A']], [2, ['A']]]);
+  assert.deepEqual(lines('X="# rnsec-ignore: A"\ny=2\n', '.npmrc'), []);
+
+  // XML comments are recognized even when prose around them contains apostrophes
+  const xml = parseSuppressions("<a>it's <!-- rnsec-ignore: A --></a>\n<b/>\n", 'AndroidManifest.xml');
+  assert.ok(isSuppressed(xml, 'A', 1) && isSuppressed(xml, 'A', 2));
+  assert.deepEqual(lines("<a x='<!-- rnsec-ignore: A -->'/>\n<b/>\n", 'x.xml'), []);
+
+  // malformed directives never suppress; several well-formed IDs do
+  assert.deepEqual(lines('// rnsec-ignore:\nx\n', 'a.ts'), []);
+  assert.deepEqual(lines('// rnsec-ignore: a_lower\nx\n', 'a.ts'), []);
+  assert.deepEqual(lines('// rnsec-ignore: A,\nx\n', 'a.ts'), []);
+  assert.deepEqual(lines('// rnsec-ignore: A, b\nx\n', 'a.ts'), []);
+  assert.deepEqual(lines('// rnsec-ignore: A, B reason\nx\n', 'a.ts'), [[1, ['A', 'B']], [2, ['A', 'B']]]);
+});
 
 test('isNonAppSourcePath: tooling folders and root-level config files', () => {
   const root = '/p';

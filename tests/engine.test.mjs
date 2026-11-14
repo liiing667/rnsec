@@ -19,10 +19,28 @@ test('code inside a __DEV__ block IS suppressed, else-branch is not', () => {
 test('rnsec-ignore suppresses only the named rule on that line', () => {
   const r = scan('inline-suppression');
   const http = byRule(r, 'INSECURE_HTTP_URL').map(f => f.line);
-  assert.deepEqual(http, [4, 5], 'only line 3 (named rule, next line) is suppressed');
+  assert.ok(!http.includes(3) && http.includes(4) && http.includes(5), 'only line 3 (named rule, next line) is suppressed');
   const timeouts = byRule(r, 'NO_REQUEST_TIMEOUT').map(f => f.line);
   assert.ok(!timeouts.includes(5), 'trailing comment suppresses NO_REQUEST_TIMEOUT on its own line');
   assert.ok(timeouts.includes(4), 'other lines keep their findings');
+});
+
+test('rnsec-ignore text inside strings or template literals never suppresses', () => {
+  const r = scan('inline-suppression');
+  const http = byRule(r, 'INSECURE_HTTP_URL');
+  assert.ok(
+    http.some(f => f.line === 9),
+    `directive-shaped text in a string must not hide line 9, got lines ${http.map(f => f.line)}`
+  );
+  assert.ok(http.some(f => f.line === 13), `template-literal text must not hide line 13, got ${http.map(f => f.line)}`);
+});
+
+test('block comments stop suppressing at their closing delimiter and malformed directives do nothing', () => {
+  const r = scan('inline-suppression');
+  const httpLines = byRule(r, 'INSECURE_HTTP_URL').map(f => f.line);
+  assert.ok(httpLines.includes(19), 'first line after the block comment close must still be reported');
+  assert.ok(!httpLines.includes(17), 'a line inside the block comment itself is covered by the directive');
+  assert.ok(httpLines.includes(23), 'a malformed rnsec-ignore (no rule ID) must not suppress');
 });
 
 test('projects living under dev/assets folders are not suppressed by absolute path', () => {
