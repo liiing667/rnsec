@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, symlinkSync, renameSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { scan, byRule, repoRoot, casesDir, untrackedProject, fakeSecret } from './helpers.mjs';
+import { scan, byRule, repoRoot, casesDir, untrackedProject, gitProject, fakeSecret } from './helpers.mjs';
 
 const bin = resolve(repoRoot, process.env.RNSEC_BIN ?? 'dist/index.js');
 const run = (args, opts = {}) =>
@@ -82,7 +82,7 @@ test('baseline: finding stays baselined after lines are inserted above; new find
   const w = run(['-p', dir, '--json', '--write-baseline', baseline, '--fail-on', 'low']);
   assert.equal(w.status, 0, 'write-baseline always exits 0');
   const written = JSON.parse(readFileSync(baseline, 'utf8'));
-  assert.equal(written.version, 1);
+  assert.equal(written.version, 2);
   assert.equal(written.tool, 'rnsec');
   assert.ok(written.generatedAt);
   const entry = written.findings.find(f => f.ruleId === 'INSECURE_HTTP_URL');
@@ -100,6 +100,70 @@ test('baseline: finding stays baselined after lines are inserted above; new find
   assert.match(http[0].filePath, /src\/b\.js$/);
   assert.equal(result.baselinedCount, 1);
   assert.match(p.stderr, /1 finding\(s\) hidden by baseline/);
+});
+
+test('fingerprints are identical when the repo is scanned through a symlinked root', () => {
+  // Tracked files are the real-world case: git reports the physical root while the
+  // user invoked the scan through a logical (symlinked) path.
+  const dir = gitProject({ 'src/a.js': medium }, { commit: true });
+  const link = join(scratch(), 'linked-repo');
+  symlinkSync(dir, link, 'dir');
+  const direct = byRule(scan(dir), 'INSECURE_HTTP_URL').map(f => f.fingerprint).sort();
+  const linked = byRule(scan(link), 'INSECURE_HTTP_URL').map(f => f.fingerprint).sort();
+  assert.ok(direct.length > 0);
+  assert.deepEqual(linked, direct);
+});
+
+test('fingerprints and baseline keep working after the project directory is moved', () => {
+  const dir = gitProject({ 'src/a.js': medium }, { commit: true });
+  const baseline = join(scratch(), 'moved-baseline.json');
+  run(['-p', dir, '--json', '--write-baseline', baseline]);
+
+  const moved = join(scratch(), 'project-relocated');
+  renameSync(dir, moved);
+  assert.ok(!existsSync(dir));
+  const p = run(['-p', moved, '--json', '--baseline', baseline]);
+  const result = JSON.parse(p.stdout);
+  assert.equal(result.findings.length, 0, 'the moved finding stays hidden by the old baseline');
+  assert.equal(result.baselinedCount, 1);
+
+  // A freshly written baseline from the moved location stores the same repo-relative file
+  const rewritten = join(scratch(), 'rewritten-baseline.json');
+  run(['-p', moved, '--json', '--write-baseline', rewritten]);
+  const files = JSON.parse(readFileSync(rewritten, 'utf8')).findings.map(f => f.file);
+  assert.deepEqual(files, ['src/a.js']);
+});
+
+test('comment-only edits do not change fingerprints, but source-line changes do', () => {
+  const line = "fetch('http://api.example.com/plain', { timeout: 5 });";
+  const dir = untrackedProject({ 'src/a.js': `// original header\n${line}\n` });
+  const before = byRule(scan(dir), 'INSECURE_HTTP_URL').map(f => f.fingerprint);
+
+  writeFileSync(join(dir, 'src/a.js'), `// a completely different comment\n${line}\n`);
+  const afterComment = byRule(scan(dir), 'INSECURE_HTTP_URL').map(f => f.fingerprint);
+  assert.deepEqual(afterComment, before, 'editing the comment above leaves the fingerprint stable');
+
+  writeFileSync(join(dir, 'src/a.js'), `// a completely different comment\n${line.replace('timeout: 5', 'timeout: 9')}\n`);
+  const afterCode = byRule(scan(dir), 'INSECURE_HTTP_URL').map(f => f.fingerprint);
+  assert.notDeepEqual(afterCode, before, 'changing the flagged source line changes the fingerprint');
+});
+
+test('baseline: legacy v1 files are still read and trigger a rewrite signal', () => {
+  const dir = untrackedProject({ 'src/a.js': medium });
+  const fresh = join(scratch(), 'fresh.json');
+  run(['-p', dir, '--json', '--write-baseline', fresh]);
+  const current = JSON.parse(readFileSync(fresh, 'utf8'));
+  assert.equal(current.version, 2);
+
+  // Re-label the same fingerprints as a legacy v1 baseline
+  const legacy = join(scratch(), 'legacy-v1.json');
+  writeFileSync(legacy, JSON.stringify({ ...current, version: 1 }));
+  const p = run(['-p', dir, '--json', '--baseline', legacy]);
+  assert.equal(p.status, 0);
+  const result = JSON.parse(p.stdout);
+  assert.equal(result.baselinedCount, 1, 'v1 fingerprints still hide the findings');
+  assert.match(p.stderr, /legacy v1 format/);
+  assert.match(p.stderr, /--write-baseline/);
 });
 
 test('baseline: exit code is computed after filtering; config baseline key works', () => {

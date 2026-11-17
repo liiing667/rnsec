@@ -369,7 +369,9 @@ rnsec scan --write-baseline .rnsec-baseline.json
 rnsec scan --baseline .rnsec-baseline.json
 ```
 
-You can also set `"baseline": ".rnsec-baseline.json"` in the [config file](#configuration) (relative to the scan root). Each finding is identified by a fingerprint of the rule ID, the file path, the whitespace-normalized source line and an occurrence index, not by its line number, so findings survive code moving around. Changing the flagged line itself makes the finding show up again. The number of hidden findings is printed and stored as `baselinedCount` in the JSON result. `--write-baseline` honors `--min-confidence`.
+You can also set `"baseline": ".rnsec-baseline.json"` in the [config file](#configuration) (relative to the scan root). Each finding is identified by a fingerprint of the rule ID, a project-root-relative file path (always with `/` separators, computed lexically so it is unaffected by symlinked roots, case-insensitive filesystems or moving the directory), the comment-free, whitespace-normalized source line and an occurrence index that keeps repeated identical lines distinct. The line number is not part of the fingerprint, so findings survive code moving around, and comment-only edits do not invalidate them either; changing the flagged source line itself makes the finding show up again. The number of hidden findings is printed and stored as `baselinedCount` in the JSON result. `--write-baseline` honors `--min-confidence`.
+
+Baselines written by current releases use format version 2. Baseline files produced by rnsec 1.4.0 (version 1, based on resolved physical paths) remain readable: they keep hiding findings, but rnsec prints a warning asking you to regenerate the file with `--write-baseline` so the fingerprints gain the stability guarantees above.
 
 ## Configuration
 

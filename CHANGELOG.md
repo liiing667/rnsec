@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **Stable baseline fingerprints (baseline format v2).** Fingerprints now use the logical project root and lexical, forward-slash relative paths instead of `realpath`-resolved physical paths, so the same repository no longer gets new fingerprints when scanned through a symlinked root, on a case-insensitive filesystem or after the directory is moved. Comments are stripped before hashing, so comment-only edits leave a finding's identity unchanged while a change to the flagged source line still produces a new fingerprint; repeated identical lines remain distinguishable via an occurrence index.
+
+### Compatibility
+
+- Baseline files written by rnsec 1.4.0 (format version 1) are still read and keep hiding findings. rnsec prints a warning suggesting a `--write-baseline` rewrite; newly written baselines use version 2.
+
 ## [1.4.0] - 2026-10-23
 
 ### New rules, CI features and far fewer false positives

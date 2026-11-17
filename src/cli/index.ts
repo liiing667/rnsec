@@ -349,14 +349,25 @@ program
       let baselinedCount = 0;
       if (baselinePath) {
         let known: Set<string>;
+        let baselineVersion: number | undefined;
         try {
-          known = await readBaseline(baselinePath);
+          const baseline = await readBaseline(baselinePath);
+          known = baseline.fingerprints;
+          baselineVersion = baseline.version;
         } catch (error) {
           fatal(error instanceof Error ? error.message : String(error));
         }
         const remaining = findings.filter(f => !known.has(f.fingerprint!));
         baselinedCount = findings.length - remaining.length;
         findings = remaining;
+        if (baselineVersion === 1 && !options.silent) {
+          info(
+            chalk.yellow(
+              `⚠ Baseline ${baselinePath} uses the legacy v1 format. It is still supported, but its fingerprints can change when the project moves or is scanned through a symlink. Rewrite it with --write-baseline to get stable v2 fingerprints.`
+            ),
+            options.json
+          );
+        }
         if (baselinedCount > 0 && !options.silent) {
           info(chalk.yellow(`ℹ ${baselinedCount} finding(s) hidden by baseline ${baselinePath}`), options.json);
         }
