@@ -371,6 +371,12 @@ export interface SecretPattern {
   suggestion?: string;
   /** Return 'skip' to drop the match, a refinement to adjust it, or null to keep it as is */
   refine?: (value: string, surrounding: string) => PatternRefinement | 'skip' | null;
+  /**
+   * Boundary of the actual key material inside a match. Defaults to the whole
+   * value. Fixed provider prefixes (sk_live_, AKIA, ghp_ ...) are stripped so
+   * the allowlist only has to explain the material, never the scheme.
+   */
+  materialOf?: (value: string) => string;
 }
 
 function decodeBase64Url(part: string): string | null {
@@ -394,6 +400,7 @@ export const API_SECRET_PATTERNS: SecretPattern[] = [
     description: 'Google/Firebase API key detected (public by design for Firebase and Maps, restrict it in the console)',
     publicByDesign: true,
     suggestion: RESTRICT_IN_CONSOLE,
+    materialOf: value => value.replace(/^AIza/, ''),
     refine: (_value, surrounding) =>
       // Gemini / Generative Language keys use the same AIza format but are NOT safe in client code
       /gemini|generativelanguage|generative-ai|googleai/i.test(surrounding)
@@ -411,6 +418,7 @@ export const API_SECRET_PATTERNS: SecretPattern[] = [
     pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
     severity: Severity.HIGH,
     description: 'AWS Access Key ID detected',
+    materialOf: value => value.replace(/^(?:AKIA|ASIA)/, ''),
   },
   {
     name: 'AWS Secret Key',
@@ -433,12 +441,14 @@ export const API_SECRET_PATTERNS: SecretPattern[] = [
     pattern: /\bsk_live_[0-9a-zA-Z]{24,}/g,
     severity: Severity.HIGH,
     description: 'Stripe Live Secret Key detected',
+    materialOf: value => value.replace(/^sk_live_/, ''),
   },
   {
     name: 'Stripe Restricted API Key',
     pattern: /\brk_live_[0-9a-zA-Z]{24,}/g,
     severity: Severity.HIGH,
     description: 'Stripe Restricted Key detected',
+    materialOf: value => value.replace(/^rk_live_/, ''),
   },
   {
     name: 'Stripe Test Secret Key',
@@ -446,6 +456,7 @@ export const API_SECRET_PATTERNS: SecretPattern[] = [
     severity: Severity.LOW,
     confidence: 'medium',
     description: 'Stripe test-mode secret key detected (cannot move real money, but still should not ship in code)',
+    materialOf: value => value.replace(/^sk_test_/, ''),
   },
   {
     name: 'Stripe Publishable Key',
@@ -455,6 +466,7 @@ export const API_SECRET_PATTERNS: SecretPattern[] = [
     description: 'Stripe publishable key detected (public by design, safe to expose)',
     publicByDesign: true,
     suggestion: 'Stripe publishable keys are safe to ship in client code. Load them from config for easier rotation; never ship the secret key.',
+    materialOf: value => value.replace(/^pk_(?:live|test)_/, ''),
   },
   {
     name: 'Sentry DSN',
@@ -471,18 +483,21 @@ export const API_SECRET_PATTERNS: SecretPattern[] = [
     pattern: /\bgh[pousr]_[0-9a-zA-Z]{36}\b/g,
     severity: Severity.HIGH,
     description: 'GitHub token detected',
+    materialOf: value => value.replace(/^gh[pousr]_/, ''),
   },
   {
     name: 'GitHub Fine-grained Token',
     pattern: /\bgithub_pat_[0-9A-Za-z_]{82}\b/g,
     severity: Severity.HIGH,
     description: 'GitHub fine-grained personal access token detected',
+    materialOf: value => value.replace(/^github_pat_/, ''),
   },
   {
     name: 'Slack Token',
     pattern: /\bxox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[0-9a-zA-Z]{24,}/g,
     severity: Severity.HIGH,
     description: 'Slack Token detected',
+    materialOf: value => value.replace(/^xox[baprs]-/, ''),
   },
   {
     name: 'Slack Webhook',
@@ -495,12 +510,14 @@ export const API_SECRET_PATTERNS: SecretPattern[] = [
     pattern: /\bSG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}(?![0-9A-Za-z_\-])/g,
     severity: Severity.HIGH,
     description: 'SendGrid API Key detected',
+    materialOf: value => value.replace(/^SG\./, ''),
   },
   {
     name: 'DigitalOcean Token',
     pattern: /\bdop_v1_[a-f0-9]{64}\b/g,
     severity: Severity.HIGH,
     description: 'DigitalOcean Personal Access Token detected',
+    materialOf: value => value.replace(/^dop_v1_/, ''),
   },
   {
     name: 'Mailchimp API Key',
@@ -523,6 +540,7 @@ export const API_SECRET_PATTERNS: SecretPattern[] = [
     description: 'Twilio API Key detected',
     contextKeyword: /twilio|api[_\-]?(?:key|sid)|account[_\-]?sid|auth[_\-]?token/i,
     minEntropy: 3.0,
+    materialOf: value => value.replace(/^SK/, ''),
   },
   {
     name: 'Mailgun API Key',
@@ -531,6 +549,7 @@ export const API_SECRET_PATTERNS: SecretPattern[] = [
     description: 'Mailgun API Key detected',
     contextKeyword: /mailgun|api[_\-]?key|apikey|secret|token|auth/i,
     minEntropy: 3.0,
+    materialOf: value => value.replace(/^key-/, ''),
   },
   {
     name: 'Heroku API Key',

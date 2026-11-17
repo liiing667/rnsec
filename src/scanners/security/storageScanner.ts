@@ -10,11 +10,11 @@ import {
   hasSensitiveWord,
   isCredentialKeyName,
   isPiiKeyName,
-  isPlaceholderValue,
   looksRandom,
   shannonEntropy,
   tokenizeIdentifier,
 } from '../../utils/sensitiveDataPatterns.js';
+import { isAllowedCredential } from '../../utils/credentialFacts.js';
 
 // ---------------------------------------------------------------------------
 // AST helpers
@@ -458,7 +458,18 @@ function evaluateSecretValue(kind: SecretKind, name: string, value: string): 'hi
   // API_KEY_EXPOSED drops the well-known sample token, HARDCODED_SECRETS keeps judging by name.
   if (PROVIDER_PATTERNS.some(p => p.test(value))) return null;
   if (/\s/.test(value)) return null; // sentences, UI text
-  if (isPlaceholderValue(value, true)) return null;
+  // Fact-based allowlist: only a placeholder covering the whole material exempts
+  // the literal, so e.g. "changeme" prefixes cannot hide an otherwise random key.
+  if (
+    isAllowedCredential({
+      source: 'hardcoded-literal',
+      name,
+      value,
+      material: value,
+      span: { start: 0, end: value.length },
+    })
+  )
+    return null;
   if (/^(https?|wss?|file|data):/i.test(value) || /^\.{0,2}\//.test(value) || /^@[\w-]+\/[\w.\-/]+$/.test(value)) return null;
   // i18n keys and enum-like strings: 'auth.password.label' (a JWT is dotted too, but starts with eyJ)
   if (/^[a-z][\w-]*(\.[\w-]+)+$/i.test(value) && !value.startsWith('eyJ')) return null;

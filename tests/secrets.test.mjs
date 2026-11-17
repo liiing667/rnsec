@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { scan, ids, byRule } from './helpers.mjs';
+import { scan, ids, byRule, fakeSecret } from './helpers.mjs';
 
 const linesOf = (r, ruleId) => byRule(r, ruleId).map(f => f.line);
 const secretLines = r => [...new Set([...linesOf(r, 'API_KEY_EXPOSED'), ...linesOf(r, 'HARDCODED_SECRETS')])].sort((a, b) => a - b);
@@ -185,4 +185,96 @@ test('generic API key in .env: identifiers such as *_API_KEY_ISSUER_ID / *_KEY_I
   const r = scan(gitProject({ '.env': env }));
   const lines = r.findings.filter(f => f.ruleId === 'API_KEY_EXPOSED').map(f => f.line);
   assert.deepEqual(lines, [3, 4], 'only real *_API_KEY values (also with a platform suffix) are reported');
+});
+
+// --- credential facts: material boundaries ---------------------------------
+
+const b64 = (s, urlSafe = false) =>
+  urlSafe ? Buffer.from(s).toString('base64url') : Buffer.from(s).toString('base64');
+
+test('base64-wrapped provider keys are found through the plaintext rules, once each, at provider severity', () => {
+  const dir = tempProject(
+    {
+      'App.tsx': [
+        `export const stripe = '${b64(fakeSecret('stripe_live_c'))}';`,
+        `export const aws = '${b64(fakeSecret('aws_access_key'))}';`,
+        `export const github = '${b64(fakeSecret('github_pat'), true)}';`,
+      ].join('\n') + '\n',
+    },
+    { track: false }
+  );
+  try {
+    const f = byRule(scan(dir), 'API_KEY_EXPOSED');
+    assert.deepEqual(f.map(x => x.line), [1, 2, 3]);
+    assert.ok(f.every(x => x.severity === 'HIGH'));
+    assert.ok(f.every(x => /base64-encoded wrapper/.test(x.description)));
+    assert.equal(new Set(f.map(x => x.line)).size, 3, 'one finding per wrapped credential');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('base64 wrappers stay quiet for prose, data blobs, short tokens and full placeholder material', () => {
+  const dir = tempProject(
+    {
+      'App.tsx': [
+        `export const sentence = '${b64('this is a plain english sentence with no key inside it')}';`,
+        `export const blob = 'data:image/png;base64,${b64('not a secret at all here friend')}';`,
+        `export const short = '${b64('abc123')}';`,
+        `export const placeholder = '${b64('sk_live_your_api_key_goes_here_please')}';`,
+      ].join('\n') + '\n',
+    },
+    { track: false }
+  );
+  try {
+    assert.deepEqual(byRule(scan(dir), 'API_KEY_EXPOSED'), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('allowlist needs full material coverage: a stopword substring cannot dismiss a real credential', () => {
+  const dir = tempProject(
+    {
+      'App.tsx': [
+        // "example" only covers a prefix; the random tail is real material
+        `export const cfg = { apiKey: 'example-9fA2xLq7ZpW3mC8vB1nR5yHdXy' };`,
+        // the entire value is a published sample: still allowed
+        `export const docSample = 'AKIAIOSFODNN7EXAMPLE';`,
+        // the whole material is placeholder prose: still allowed
+        `export const placeholder = { apiKey: 'your_api_key_goes_here_please_1' };`,
+        // one sequential run: still allowed
+        `export const sequential = { apiKey: 'abcdefghijklmnopqrstuvwxyz0123456789' };`,
+      ].join('\n') + '\n',
+    },
+    { track: false }
+  );
+  try {
+    const f = byRule(scan(dir), 'API_KEY_EXPOSED');
+    assert.deepEqual(f.map(x => x.line), [1]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a multi-line PEM private key in a tracked .env is one complete credential fact, not just its header', () => {
+  const env = [
+    'PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----',
+    'MIIEowIBAAKCAQEAxK3vN8Lq2ZpR7yHdW4cTfJ9mB1sXgU6aV0eQnY5oIjCkPzDw',
+    'abcDEF1234567890ghijKLmnOPqrstUVwxYZ0123456789ABCDEFGHIJKLMNOP',
+    '-----END RSA PRIVATE KEY-----"',
+    'API_URL=https://api.myshop.dev',
+  ].join('\n') + '\n';
+  const dir = tempProject({ '.env': env, 'App.tsx': 'export default function App() { return null; }\n' }, { track: true });
+  try {
+    const r = scan(dir);
+    assert.deepEqual(linesOf(r, 'API_KEY_EXPOSED'), [1]);
+    const envRule = byRule(r, 'ENV_FILE_COMMITTED');
+    assert.equal(envRule.length, 1);
+    assert.equal(envRule[0].line, 1);
+    assert.match(envRule[0].description, /PRIVATE_KEY/);
+    assert.ok(!JSON.stringify(envRule[0]).includes('MIIEowIBAAKCAQEA'), 'key body must be masked');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
