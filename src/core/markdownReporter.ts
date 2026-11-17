@@ -1,9 +1,12 @@
 import type { Finding, ScanResult } from '../types/findings.js';
 import { compareScans, generateComparisonSummary, type ScanComparison } from '../utils/scanComparison.js';
+import { countBySeverity, escapeMarkdownCode, escapeMarkdownText, reportLocation, sortFindings } from './reportUtils.js';
 
 export interface MarkdownReportOptions {
   previousFindings?: Finding[];
   includeComparison?: boolean;
+  /** Directory finding paths are rendered relative to (git root, or the scan root outside git) */
+  repoRoot?: string;
 }
 
 export class MarkdownReporter {
@@ -26,7 +29,7 @@ export class MarkdownReporter {
     if (findings.length === 0) {
       report += this.generateSuccessReport(result, comparison);
     } else {
-      report += this.generateVulnerabilityReport(result, comparison);
+      report += this.generateVulnerabilityReport(result, comparison, options);
     }
     
     return report;
@@ -73,12 +76,10 @@ Great job! No security vulnerabilities detected.
     return report;
   }
 
-  private generateVulnerabilityReport(result: ScanResult, comparison?: ScanComparison): string {
+  private generateVulnerabilityReport(result: ScanResult, comparison?: ScanComparison, options?: MarkdownReportOptions): string {
     const { findings, scannedFiles, duration, timestamp } = result;
-    
-    const high = findings.filter(f => f.severity === 'HIGH').length;
-    const medium = findings.filter(f => f.severity === 'MEDIUM').length;
-    const low = findings.filter(f => f.severity === 'LOW').length;
+
+    const { high, medium, low } = countBySeverity(findings);
     
     const riskLevel = high >= 3 ? '🚨 CRITICAL' 
       : high >= 1 ? '⚠️ HIGH' 
@@ -111,19 +112,19 @@ ${riskLevel} **${findings.length} security ${findings.length === 1 ? 'issue' : '
       markdown += generateComparisonSummary(comparison);
     }
 
-    // Group findings by severity
-    const grouped = this.groupBySeverity(findings);
+    // Canonical order, then group by severity: the same sequence SARIF and HTML emit.
+    const grouped = this.groupBySeverity(sortFindings(findings));
     
     if (grouped.HIGH.length > 0) {
-      markdown += this.generateSeveritySection('🔴 High Severity', grouped.HIGH);
+      markdown += this.generateSeveritySection('🔴 High Severity', grouped.HIGH, options?.repoRoot);
     }
     
     if (grouped.MEDIUM.length > 0) {
-      markdown += this.generateSeveritySection('🟡 Medium Severity', grouped.MEDIUM);
+      markdown += this.generateSeveritySection('🟡 Medium Severity', grouped.MEDIUM, options?.repoRoot);
     }
     
     if (grouped.LOW.length > 0) {
-      markdown += this.generateSeveritySection('🔵 Low Severity', grouped.LOW);
+      markdown += this.generateSeveritySection('🔵 Low Severity', grouped.LOW, options?.repoRoot);
     }
 
     markdown += `---
@@ -138,7 +139,7 @@ ${this.generateRiskAssessment(high, medium, low)}
     return markdown;
   }
 
-  private generateSeveritySection(title: string, findings: Finding[]): string {
+  private generateSeveritySection(title: string, findings: Finding[], repoRoot?: string): string {
     let section = `\n### ${title}\n\n`;
     
     // Add collapsible section for better organization
@@ -148,22 +149,28 @@ ${this.generateRiskAssessment(high, medium, low)}
       const icon = finding.severity === 'HIGH' ? '🔴' : 
                    finding.severity === 'MEDIUM' ? '🟡' : '🔵';
       
-      const location = finding.filePath ? `\`${this.formatFilePath(finding.filePath)}${finding.line ? `:${finding.line}` : ''}\`` : '';
+      const locationText = repoRoot ? reportLocation(finding, repoRoot) : this.formatFilePath(finding.filePath);
+      const location = locationText ? `\`${escapeMarkdownCode(locationText)}\`` : '';
       const debugBadge =
         (finding.isDebugContext ? ' 🐛 [DEBUG]' : '') +
         (finding.confidence && finding.confidence !== 'high' ? ` _(${finding.confidence} confidence)_` : '');
+      // Same identity as the SARIF partial fingerprint / HTML data-fingerprint.
+      const identity = finding.fingerprint ? ` \`${escapeMarkdownCode(finding.fingerprint.slice(0, 12))}\`` : '';
       
-      section += `${index + 1}. **${icon} ${finding.description || finding.ruleId}**${debugBadge}\n`;
+      section += `${index + 1}. **${icon} ${escapeMarkdownText(finding.description || finding.ruleId)}** \`${escapeMarkdownCode(finding.ruleId)}\`${identity}${debugBadge}\n`;
       if (location) {
         section += `   📍 ${location}\n`;
       }
       if (finding.suggestion) {
-        section += `   💡 **Suggestion:** ${finding.suggestion}\n`;
+        section += `   💡 **Suggestion:** ${escapeMarkdownText(finding.suggestion)}\n`;
       }
       
       // Add code snippet if available
       if (finding.snippet) {
-        section += `   \n   **Code:**\n   \`\`\`typescript\n   ${finding.snippet}\n   \`\`\`\n`;
+        // Inside a fenced block the source stays verbatim; only a fence-closing
+        // sequence inside the snippet has to be neutralized.
+        const fence = finding.snippet.includes('```') ? '````' : '```';
+        section += `   \n   **Code:**\n   ${fence}typescript\n   ${finding.snippet}\n   ${fence}\n`;
       }
       
       section += '\n';
@@ -203,6 +210,7 @@ ${this.generateRiskAssessment(high, medium, low)}
     );
   }
 
+  /** Fallback only: keeps working when a caller does not provide the repo root. */
   private formatFilePath(filePath: string): string {
     const parts = filePath.split('/');
     if (parts.length > 3) {

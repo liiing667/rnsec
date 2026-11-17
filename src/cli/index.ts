@@ -34,6 +34,7 @@ import { gradleRules } from '../scanners/android/gradleScanner.js';
 import { registryConfigRules } from '../scanners/modules/registryConfigScanner.js';
 import { credentialFileRules } from '../scanners/security/credentialFilesScanner.js';
 import { SarifReporter } from '../core/sarifReporter.js';
+import { sortFindings } from '../core/reportUtils.js';
 import { assignFingerprints, readBaseline, resolveRepoRoot, writeBaseline } from '../core/baseline.js';
 import { Severity } from '../types/findings.js';
 import type { ScanResult, Finding, Confidence } from '../types/findings.js';
@@ -363,7 +364,9 @@ program
       }
 
       const result: ScanResult = {
-        findings,
+        // Canonical order once, so SARIF, Markdown, HTML and the console all list
+        // the same findings in the same deterministic sequence.
+        findings: sortFindings(findings),
         suppressedCount: scanResult.suppressedCount,
         baselinedCount: baselinedCount > 0 ? baselinedCount : undefined,
         scannedFiles: scanResult.scannedFiles,
@@ -382,7 +385,7 @@ program
         const htmlReporter = new HtmlReporter();
         const { resolve } = await import('path');
         const absolutePath = resolve(htmlPath);
-        await htmlReporter.generateReport(result, htmlPath);
+        await htmlReporter.generateReport(result, htmlPath, { repoRoot });
         generatedReports.html = absolutePath;
       }
 
@@ -399,7 +402,7 @@ program
         const fs = await import('fs/promises');
         const { resolve } = await import('path');
         const absolutePath = resolve(mdPath);
-        const markdownContent = markdownReporter.generateReport(result);
+        const markdownContent = markdownReporter.generateReport(result, { repoRoot });
         await fs.writeFile(absolutePath, markdownContent);
         generatedReports.md = absolutePath;
       }
@@ -449,4 +452,3 @@ program
   });
 
 program.parse(process.argv);
-

@@ -4,7 +4,7 @@ import type { Finding } from '../types/findings.js';
 import { Severity } from '../types/findings.js';
 import type { Rule } from '../types/ruleTypes.js';
 import { VERSION } from '../constants.js';
-import { relativeToRoot } from './baseline.js';
+import { reportPath, sortFindings } from './reportUtils.js';
 
 const SCHEMA = 'https://json.schemastore.org/sarif-2.1.0.json';
 const INFORMATION_URI = 'https://github.com/adnxy/rnsec';
@@ -82,7 +82,9 @@ export class SarifReporter {
       };
     });
 
-    const results = findings.map(f => ({
+    // Same canonical order as the Markdown and HTML reports, so a finding at index N
+    // is the same issue everywhere.
+    const results = sortFindings(findings).map(f => ({
       ruleId: f.ruleId,
       ruleIndex: ruleIndex.get(f.ruleId)!,
       level: LEVEL[f.severity],
@@ -90,7 +92,7 @@ export class SarifReporter {
       locations: [
         {
           physicalLocation: {
-            artifactLocation: { uri: relativeToRoot(f.filePath, options.repoRoot), uriBaseId: '%SRCROOT%' },
+            artifactLocation: { uri: reportPath(f, options.repoRoot), uriBaseId: '%SRCROOT%' },
             region: { startLine: f.line ?? 1, startColumn: f.column ?? 1 },
           },
         },
