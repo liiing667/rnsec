@@ -369,7 +369,7 @@ rnsec scan --write-baseline .rnsec-baseline.json
 rnsec scan --baseline .rnsec-baseline.json
 ```
 
-You can also set `"baseline": ".rnsec-baseline.json"` in the [config file](#configuration) (relative to the scan root). Each finding is identified by a fingerprint of the rule ID, the file path, the whitespace-normalized source line and an occurrence index, not by its line number, so findings survive code moving around. Changing the flagged line itself makes the finding show up again. The number of hidden findings is printed and stored as `baselinedCount` in the JSON result. `--write-baseline` honors `--min-confidence`.
+You can also set `"baseline": ".rnsec-baseline.json"` in the [config file](#configuration) (relative to the scan root). Each finding is identified by a fingerprint of the rule ID, the file path, the whitespace-normalized source line and an occurrence index, not by its line number, so findings survive code moving around. Findings that span several lines (e.g. a multi-line private key) hash every covered line, so editing any part of the evidence — not just the flagged line — makes the finding show up again. The number of hidden findings is printed and stored as `baselinedCount` in the JSON result. `--write-baseline` honors `--min-confidence`.
 
 ## Configuration
 

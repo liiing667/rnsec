@@ -12,6 +12,8 @@ export interface Finding {
   severity: Severity;
   filePath: string;
   line?: number;
+  /** Last line of the evidence when it spans several lines (e.g. a multi-line secret). */
+  endLine?: number;
   column?: number;
   snippet?: string;
   reason?: string; // Why this security issue matters

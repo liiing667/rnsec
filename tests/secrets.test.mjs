@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { scan, ids, byRule } from './helpers.mjs';
+import { scan, ids, byRule, gitProject } from './helpers.mjs';
 
 const linesOf = (r, ruleId) => byRule(r, ruleId).map(f => f.line);
 const secretLines = r => [...new Set([...linesOf(r, 'API_KEY_EXPOSED'), ...linesOf(r, 'HARDCODED_SECRETS')])].sort((a, b) => a - b);
@@ -44,6 +44,29 @@ test('placeholders, sample tokens, bare header constants and context-free loose 
 test('a real key is still reported when the word "example" is nearby', () => {
   const r = scan('secrets-near-example');
   assert.deepEqual(linesOf(r, 'API_KEY_EXPOSED'), [2]);
+});
+
+test('a stopword substring inside real key material does not hide the secret', () => {
+  // Assembled from pieces so no literal trips push protection (see helpers.mjs)
+  const stripe = 'sk_' + 'live_' + 'example7f3a9b2c1d4e5f6a8b';
+  const github = 'gh' + 'p_' + 'KDfymGlnEJbC2gmKLvGB1xxxxtmo1wNh17Q7';
+  const dir = gitProject({ 'keys.ts': `export const a = "${stripe}";\nexport const b = "${github}";\n` });
+  const f = byRule(scan(dir), 'API_KEY_EXPOSED');
+  assert.deepEqual(f.map(x => x.line), [1, 2], 'stopwords are whole-value placeholders, not substring exemptions');
+});
+
+test('a multi-line private key is one finding spanning the whole block', () => {
+  const pem = [
+    '-----BEGIN PRIVATE KEY-----',
+    'MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC7VJTUt9Us8cKj',
+    'MzEfYyjiWA4R4/M2bS1GB4t7NXp98C3SC6dVMvDuictGeurT8jNbvJZHtCSuYEvu',
+    '-----END PRIVATE KEY-----',
+  ].join('\n');
+  const dir = gitProject({ 'key.ts': `const pem = \`${pem}\`;\nexport default pem;\n` });
+  const f = byRule(scan(dir), 'API_KEY_EXPOSED');
+  assert.equal(f.length, 1, `expected one finding, got ${JSON.stringify(f.map(x => [x.line, x.description]))}`);
+  assert.equal(f[0].line, 1);
+  assert.equal(f[0].endLine, 4, 'the finding covers the complete key material');
 });
 
 test('loose patterns fire with keyword context and entropy; anon JWT is LOW', () => {
@@ -169,6 +192,43 @@ test('API_KEY_EXPOSED works on tracked .env files (provider key and unquoted API
   try {
     const r = scan(dir);
     assert.deepEqual(linesOf(r, 'API_KEY_EXPOSED'), [1, 2]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ENV_FILE_COMMITTED reports every secret with its own line and full extent', () => {
+  const jwt = rand(40);
+  const apiKey = rand(36);
+  const pem = [
+    '-----BEGIN PRIVATE KEY-----',
+    'MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC7VJTUt9Us8cKj',
+    '-----END PRIVATE KEY-----',
+  ].join('\n');
+  const dir = tempProject({
+    '.env': `JWT_SECRET=${jwt}\nPRIVATE_KEY="${pem}"\nAPI_KEY=${apiKey}\n`,
+    'App.tsx': 'export default function App() { return null; }\n',
+  }, { track: true });
+  try {
+    const f = byRule(scan(dir), 'ENV_FILE_COMMITTED');
+    assert.deepEqual(f.map(x => x.line), [1, 2, 5], 'one finding per secret, each on its own line');
+    assert.equal(f[1].endLine, 4, 'the multi-line value is covered to its closing quote');
+    assert.ok(!JSON.stringify(f).includes(jwt) && !JSON.stringify(f).includes(apiKey), 'values stay masked');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rnsec-ignore on one .env secret does not hide the others', () => {
+  const dir = tempProject({
+    '.env': `# rnsec-ignore: ENV_FILE_COMMITTED\nJWT_SECRET=${rand(40)}\nAPI_KEY=${rand(36)}\n`,
+    'App.tsx': 'export default function App() { return null; }\n',
+  }, { track: true });
+  try {
+    const f = byRule(scan(dir), 'ENV_FILE_COMMITTED');
+    assert.equal(f.length, 1, 'only the commented secret is suppressed');
+    assert.match(f[0].description, /API_KEY/);
+    assert.equal(f[0].line, 3);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

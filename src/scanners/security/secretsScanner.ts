@@ -27,6 +27,8 @@ interface EnvVar {
   name: string;
   value: string;
   line: number;
+  /** Last line of the value (quoted values may span several lines) */
+  endLine: number;
 }
 
 /** The line holding `index` plus the line before it (keyword prefilter window for loose patterns). */
@@ -41,24 +43,49 @@ function maskSecret(text: string): string {
   return text.length > 20 ? text.substring(0, 20) + '...[REDACTED]' : text.substring(0, 8) + '...[REDACTED]';
 }
 
-/** `NAME=value` lines of a dotenv file. Comment lines are not variables. */
+/** `NAME=value` lines of a dotenv file. Comment lines are not variables. Quoted values may span several lines. */
 function parseEnvVars(content: string): EnvVar[] {
   const vars: EnvVar[] = [];
-  content.split('\n').forEach((raw, i) => {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) return;
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith('#')) continue;
     const m = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(.*)$/);
-    if (!m) return;
+    if (!m) continue;
+    const startLine = i + 1;
     let value = m[2].trim();
     const quote = value[0];
+    let endLine = startLine;
     if (quote === '"' || quote === "'") {
       const close = value.indexOf(quote, 1);
-      value = close === -1 ? value.slice(1) : value.slice(1, close);
+      if (close === -1) {
+        // Multi-line quoted value: keep the complete value (and its extent) so the
+        // whole secret flows through detection, suppression, baseline and reports.
+        const parts = [value.slice(1)];
+        for (let j = i + 1; j < lines.length; j++) {
+          const end = lines[j].indexOf(quote);
+          if (end === -1) {
+            parts.push(lines[j]);
+          } else {
+            parts.push(lines[j].slice(0, end));
+            endLine = j + 1;
+            break;
+          }
+        }
+        if (endLine > startLine) {
+          value = parts.join('\n');
+          i = endLine - 1;
+        } else {
+          value = value.slice(1);
+        }
+      } else {
+        value = value.slice(1, close);
+      }
     } else {
       value = value.replace(/\s+#.*$/, '').trim();
     }
-    vars.push({ name: m[1], value, line: i + 1 });
-  });
+    vars.push({ name: m[1], value, line: startLine, endLine });
+  }
   return vars;
 }
 
@@ -173,7 +200,7 @@ const apiKeyDetectionRule: Rule = {
         if (!isApiKeyName || v.value.length < 20) continue;
         if (isPlaceholderValue(v.value, true) || !looksRandom(v.value, 3.5)) continue;
         const start = lineStarts[v.line - 1];
-        const end = start + lines[v.line - 1].length;
+        const end = lineStarts[v.endLine - 1] + lines[v.endLine - 1].length;
         if (overlapsClaimed(start, end)) continue;
         claimed.push([start, end]);
         candidates.push({
@@ -194,6 +221,7 @@ const apiKeyDetectionRule: Rule = {
     candidates.sort((a, b) => a.start - b.start);
     return candidates.map(c => {
       const line = getLineNumber(fileContent, c.start);
+      const endLine = getLineNumber(fileContent, Math.max(c.start, c.end - 1));
       const finding: Finding = {
         ruleId: 'API_KEY_EXPOSED',
         description: `${c.description}: ${maskSecret(c.matchedText)}`,
@@ -203,6 +231,7 @@ const apiKeyDetectionRule: Rule = {
         snippet: extractSnippet(fileContent, line),
         suggestion: c.suggestion,
       };
+      if (endLine > line) finding.endLine = endLine;
       if (c.confidence) finding.confidence = c.confidence;
       return finding;
     });
@@ -222,20 +251,22 @@ const envFileCommittedRule: Rule = {
     const offending = parseEnvVars(context.fileContent).filter(isSecretEnvVar);
     if (offending.length === 0) return [];
 
-    const first = offending[0];
-    const masked = first.value.length >= 12 ? `${first.value.slice(0, 2)}****` : '****';
-    const more = offending.length > 1 ? ` (and ${offending.length - 1} more)` : '';
-    return [
-      {
+    // One finding per secret: each value keeps its own line/extent, so an rnsec-ignore
+    // comment or a baseline entry for one secret can never hide the others.
+    return offending.map(v => {
+      const masked = v.value.length >= 12 ? `${v.value.slice(0, 2)}****` : '****';
+      const finding: Finding = {
         ruleId: 'ENV_FILE_COMMITTED',
-        description: `Git-tracked ${fileName} contains secret ${first.name}=${masked}${more}`,
+        description: `Git-tracked ${fileName} contains secret ${v.name}=${masked}`,
         severity: Severity.HIGH,
         filePath: context.filePath,
-        line: first.line,
-        snippet: `${first.name}=${masked}`,
+        line: v.line,
+        snippet: `${v.name}=${masked}`,
         suggestion: 'Remove the file from git (git rm --cached), add .env files to .gitignore and rotate the exposed secrets. Commit a .env.example with placeholder values instead.',
-      },
-    ];
+      };
+      if (v.endLine > v.line) finding.endLine = v.endLine;
+      return finding;
+    });
   },
 };
 

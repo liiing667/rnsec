@@ -44,6 +44,8 @@ function normalizeLine(text: string): string {
  * Sets `fingerprint` on every finding: sha256 of ruleId + repo-relative path + the
  * whitespace-normalized source line (not its number, so it survives code moving) +
  * an occurrence index separating identical keys within a file.
+ * Findings that span several lines (e.g. a multi-line secret) hash every covered
+ * line, so editing any part of the secret breaks the baseline match.
  */
 export function assignFingerprints(findings: Finding[], root: string): void {
   const lineCache = new Map<string, string[] | null>();
@@ -64,8 +66,15 @@ export function assignFingerprints(findings: Finding[], root: string): void {
   const seen = new Map<string, number>();
   for (const f of ordered) {
     const lines = f.line ? linesOf(f.filePath) : null;
-    // Project-level findings have no source line: fall back to the description
-    const text = normalizeLine(lines?.[f.line! - 1] ?? '') || f.description;
+    // Project-level findings have no source line: fall back to the description.
+    // Multi-line findings hash their whole extent; single-line findings hash exactly
+    // the one source line, so their fingerprints are unchanged.
+    let text = '';
+    if (lines && f.line) {
+      const last = f.endLine && f.endLine > f.line ? Math.min(f.endLine, lines.length) : f.line;
+      text = normalizeLine(lines.slice(f.line - 1, last).join('\n'));
+    }
+    text = text || f.description;
     const key = [f.ruleId, relativeToRoot(f.filePath, root), text].join('\0');
     const occurrence = seen.get(key) ?? 0;
     seen.set(key, occurrence + 1);

@@ -91,7 +91,11 @@ export class SarifReporter {
         {
           physicalLocation: {
             artifactLocation: { uri: relativeToRoot(f.filePath, options.repoRoot), uriBaseId: '%SRCROOT%' },
-            region: { startLine: f.line ?? 1, startColumn: f.column ?? 1 },
+            region: {
+              startLine: f.line ?? 1,
+              startColumn: f.column ?? 1,
+              ...(f.endLine && f.endLine > (f.line ?? 1) ? { endLine: f.endLine } : {}),
+            },
           },
         },
       ],

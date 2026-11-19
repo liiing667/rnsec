@@ -124,6 +124,25 @@ test('baseline: missing or invalid file is a clear error', () => {
   assert.match(run(['-p', dir, '--json', '--baseline', bogus]).stderr, /not a valid rnsec baseline/);
 });
 
+test('baseline: editing the body of a multi-line secret breaks the baseline match', () => {
+  const pem = body =>
+    `const pem = \`-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----\`;\nexport default pem;\n`;
+  const dir = untrackedProject({
+    'src/key.ts': pem('MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC7VJTUt9Us8cKj'),
+  });
+  const baseline = join(scratch(), 'baseline.json');
+  run(['-p', dir, '--json', '--write-baseline', baseline]);
+  const same = JSON.parse(run(['-p', dir, '--json', '--baseline', baseline]).stdout);
+  assert.equal(same.findings.length, 0, 'unchanged secret stays baselined');
+  assert.equal(same.baselinedCount, 1);
+
+  writeFileSync(join(dir, 'src/key.ts'), pem('ROTATEDwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC7VJTUt9Us8cKj'));
+  const rotated = JSON.parse(run(['-p', dir, '--json', '--baseline', baseline]).stdout);
+  assert.equal(rotated.findings.length, 1, 'rotated key material must not hide behind the old fingerprint');
+  assert.equal(rotated.findings[0].ruleId, 'API_KEY_EXPOSED');
+  assert.equal(rotated.findings[0].endLine, 3);
+});
+
 // ---- SARIF ----
 
 const sarifRun = (dir, args = []) => {
@@ -207,6 +226,21 @@ test('SARIF: project-level findings get line 1 / column 1', () => {
   const region = res.locations[0].physicalLocation.region;
   assert.equal(region.startLine, 1);
   assert.equal(region.startColumn, 1);
+});
+
+test('SARIF: multi-line findings carry their end line in the region', () => {
+  const pem = [
+    'const pem = `-----BEGIN PRIVATE KEY-----',
+    'MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC7VJTUt9Us8cKj',
+    '-----END PRIVATE KEY-----`;',
+    'export default pem;',
+  ].join('\n');
+  const dir = untrackedProject({ 'src/key.ts': pem + '\n' });
+  const { sarif } = sarifRun(dir);
+  const res = sarif.runs[0].results.find(r => r.ruleId === 'API_KEY_EXPOSED');
+  const region = res.locations[0].physicalLocation.region;
+  assert.equal(region.startLine, 1);
+  assert.equal(region.endLine, 3);
 });
 
 test('SARIF: scanning a subdirectory of a git repo yields repo-root-relative URIs', () => {

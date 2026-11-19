@@ -190,6 +190,19 @@ export function shannonEntropy(value: string): number {
 const PLACEHOLDER_VALUE =
   /example|sample|dummy|placeholder|your[_\-]|yourkey|changeme|change[_\-]me|replace[_\-]?me|redacted|xxxx|\.\.\.|<[^<>]*>|\$\{|\{\{|process\.env/i;
 
+// Global version of the stopword list, used to strip placeholder fragments from a value.
+const PLACEHOLDER_FRAGMENT = new RegExp(PLACEHOLDER_VALUE.source, 'gi');
+
+/**
+ * True when the value still holds real key material after every placeholder fragment
+ * is removed. A stopword buried inside a long random string (e.g. a live token that
+ * happens to contain "xxxx" or "example") must not exempt the whole value.
+ */
+function hasRealKeyMaterial(value: string): boolean {
+  const rest = value.replace(PLACEHOLDER_FRAGMENT, '').replace(/[^A-Za-z0-9]/g, '');
+  return rest.length >= 12 && looksRandom(rest, 3.5);
+}
+
 /** Longest run of alphanumerics that each follow the previous one (1234, abcd, DCBA). */
 function longestSequentialRun(value: string): number {
   let best = 1;
@@ -213,13 +226,15 @@ function longestSequentialRun(value: string): number {
 /**
  * True when the value is obviously not a real secret: stopword inside the value,
  * a run of one repeated character, or (when `strict`) a long sequential run like 123456789.
+ * A stopword that is only a small substring of otherwise random-looking key material
+ * does NOT make the value a placeholder.
  */
 export function isPlaceholderValue(value: string, strict = false): boolean {
   if (!value) return true;
-  if (PLACEHOLDER_VALUE.test(value)) return true;
   if (/(.)\1{7,}/.test(value)) return true;
   if (strict && longestSequentialRun(value) >= 8) return true;
-  return false;
+  if (!PLACEHOLDER_VALUE.test(value)) return false;
+  return !hasRealKeyMaterial(value);
 }
 
 /** Looks like generated key material rather than an identifier or a sentence. */
@@ -511,8 +526,11 @@ export const API_SECRET_PATTERNS: SecretPattern[] = [
   {
     // PEM headers of every private key flavour. The key body must follow, so code that only
     // compares against or documents a header (e.g. a PEM parser) is not reported.
+    // When the END header is present the whole block is consumed, so the finding (and its
+    // baseline fingerprint) covers the complete key material, not just the header line.
     name: 'Private Key',
-    pattern: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----(?=(?:\s|\\[nr]|['"`+,])*[A-Za-z0-9+/]{30,})/g,
+    pattern:
+      /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----(?=(?:\s|\\[nr]|['"`+,])*[A-Za-z0-9+/]{30,})(?:[\sA-Za-z0-9+/='"`,+]|\\[nr])*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----|-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----(?=(?:\s|\\[nr]|['"`+,])*[A-Za-z0-9+/]{30,})/g,
     severity: Severity.HIGH,
     description: 'Private key detected in source code',
   },
