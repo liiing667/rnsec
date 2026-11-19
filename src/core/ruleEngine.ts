@@ -1,5 +1,5 @@
 import { resolve, join } from 'path';
-import type { Finding } from '../types/findings.js';
+import type { Finding, RuleError } from '../types/findings.js';
 import type { ProjectInfo, Rule, RuleContext, RuleGroup } from '../types/ruleTypes.js';
 import { parseJSFile, parseJsonSafe } from './astParser.js';
 import { readFileContent } from '../utils/fileUtils.js';
@@ -56,6 +56,7 @@ export class RuleEngine {
   private ruleGroups: RuleGroup[] = [];
   private ignoredRules: Set<string> = new Set();
   private skippedFiles: number = 0;
+  private ruleErrors: RuleError[] = [];
   private excludedPaths: string[] = [];
   private rootDir: string | undefined;
   private suppressedCount: number = 0;
@@ -111,6 +112,14 @@ export class RuleEngine {
   }
 
   /**
+   * Rules that failed to execute during the last scan. A non-empty list means
+   * the scan is incomplete and callers must not treat the result as clean.
+   */
+  getRuleErrors(): RuleError[] {
+    return [...this.ruleErrors];
+  }
+
+  /**
    * Get all registered rules from all rule groups, excluding ignored ones
    * @returns Array of all rules
    */
@@ -129,9 +138,10 @@ export class RuleEngine {
     inputFilePaths: string[],
     progressCallback?: (progress: { current: number; total: number }) => void,
     rootDir?: string
-  ): Promise<{ findings: Finding[]; scannedFiles: number; skippedFiles?: number; suppressedCount?: number }> {
+  ): Promise<{ findings: Finding[]; scannedFiles: number; skippedFiles?: number; suppressedCount?: number; ruleErrors?: RuleError[] }> {
     const allFindings: Finding[] = [];
     this.skippedFiles = 0;
+    this.ruleErrors = [];
     this.suppressedCount = 0;
     this.rootDir = rootDir ? resolve(rootDir) : undefined;
     this.projectInfo = await this.loadProjectInfo();
@@ -164,11 +174,28 @@ export class RuleEngine {
       scannedFiles: totalFiles,
       skippedFiles: this.skippedFiles > 0 ? this.skippedFiles : undefined,
       suppressedCount: this.suppressedCount > 0 ? this.suppressedCount : undefined,
+      ruleErrors: this.ruleErrors.length > 0 ? this.getRuleErrors() : undefined,
     };
   }
 
   private beginScan(): void {
-    for (const rule of this.getAllRules()) rule.beginScan?.();
+    for (const rule of this.getAllRules()) {
+      try {
+        rule.beginScan?.();
+      } catch (error) {
+        this.recordRuleError(rule.id, 'beginScan', error);
+      }
+    }
+  }
+
+  /** A rule crash must not stop the scan, but it must be recorded so the result cannot look clean. */
+  private recordRuleError(ruleId: string, phase: RuleError['phase'], error: unknown, filePath?: string): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.ruleErrors.push({ ruleId, phase, message, ...(filePath ? { filePath } : {}) });
+    if (process.env.RNSEC_VERBOSE) {
+      const where = filePath ? ` on ${filePath}` : ` in ${phase}`;
+      console.warn(`⚠️  Rule ${ruleId} failed${where}: ${message}`);
+    }
   }
 
   /** Run every rule's `finalize` hook; findings with file + line honour `rnsec-ignore` in that file. */
@@ -181,9 +208,7 @@ export class RuleEngine {
       try {
         findings = await rule.finalize(this.projectInfo);
       } catch (error) {
-        if (process.env.RNSEC_VERBOSE) {
-          console.warn(`⚠️  Rule ${rule.id} failed in finalize: ${error instanceof Error ? error.message : String(error)}`);
-        }
+        this.recordRuleError(rule.id, 'finalize', error);
       }
       for (const finding of findings) {
         if (finding.filePath && finding.line !== undefined) {
@@ -215,9 +240,10 @@ export class RuleEngine {
   async runRulesOnProject(
     rootDir: string,
     progressCallback?: (progress: { current: number; total: number }) => void
-  ): Promise<{ findings: Finding[]; scannedFiles: number; skippedFiles?: number; suppressedCount?: number; unverifiedFiles?: number }> {
+  ): Promise<{ findings: Finding[]; scannedFiles: number; skippedFiles?: number; suppressedCount?: number; unverifiedFiles?: number; ruleErrors?: RuleError[] }> {
     const allFindings: Finding[] = [];
     this.skippedFiles = 0;
+    this.ruleErrors = [];
     this.suppressedCount = 0;
     this.rootDir = resolve(rootDir);
     this.projectInfo = await this.loadProjectInfo();
@@ -265,6 +291,7 @@ export class RuleEngine {
       skippedFiles: this.skippedFiles > 0 ? this.skippedFiles : undefined,
       suppressedCount: this.suppressedCount > 0 ? this.suppressedCount : undefined,
       unverifiedFiles: unverifiedFiles > 0 ? unverifiedFiles : undefined,
+      ruleErrors: this.ruleErrors.length > 0 ? this.getRuleErrors() : undefined,
     };
   }
 
@@ -287,10 +314,7 @@ export class RuleEngine {
           findings.push(...ruleFindings);
         } catch (error) {
           // A rule crash must not stop the scan, but it must not look like a clean result either
-          if (process.env.RNSEC_VERBOSE) {
-            const reason = error instanceof Error ? error.message : String(error);
-            console.warn(`⚠️  Rule ${rule.id} failed on ${filePath}: ${reason}`);
-          }
+          this.recordRuleError(rule.id, 'apply', error, filePath);
         }
       }
 

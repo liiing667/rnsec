@@ -36,7 +36,7 @@ import { credentialFileRules } from '../scanners/security/credentialFilesScanner
 import { SarifReporter } from '../core/sarifReporter.js';
 import { assignFingerprints, readBaseline, resolveRepoRoot, writeBaseline } from '../core/baseline.js';
 import { Severity } from '../types/findings.js';
-import type { ScanResult, Finding, Confidence } from '../types/findings.js';
+import type { ScanResult, Finding, Confidence, RuleError } from '../types/findings.js';
 import { VERSION, DEFAULT_REPORT_FILENAMES, EXIT_CODES } from '../constants.js';
 import { readRnsecConfig } from '../utils/fileUtils.js';
 import { getChangedFiles, isGitRepository } from '../utils/gitUtils.js';
@@ -286,7 +286,7 @@ program
         spinner.text = chalk.cyan('Analyzing source code...');
       }
 
-      let scanResult: { findings: Finding[]; scannedFiles: number; skippedFiles?: number; suppressedCount?: number; unverifiedFiles?: number };
+      let scanResult: { findings: Finding[]; scannedFiles: number; skippedFiles?: number; suppressedCount?: number; unverifiedFiles?: number; ruleErrors?: RuleError[] };
 
       if (options.changedFiles) {
         const changedFiles = await getChangedFiles(options.changedFiles, targetPath);
@@ -323,6 +323,12 @@ program
       // Show skipped files warning if any
       if (scanResult.skippedFiles && scanResult.skippedFiles > 0 && !options.silent) {
         info(chalk.yellow(`⚠️  ${scanResult.skippedFiles} file(s) skipped due to read errors (use RNSEC_VERBOSE=1 for details)`), options.json);
+      }
+
+      // Rule crashes make the scan incomplete: say so on stderr (stdout stays pure JSON)
+      if (scanResult.ruleErrors && scanResult.ruleErrors.length > 0 && !options.silent) {
+        const failedRules = [...new Set(scanResult.ruleErrors.map(e => e.ruleId))];
+        console.error(chalk.red(`❌ ${failedRules.length} rule(s) failed to execute (${failedRules.join(', ')}): the scan is incomplete and must not be treated as clean`));
       }
 
       // Always stderr, so --json stdout stays pure JSON
@@ -367,6 +373,8 @@ program
         suppressedCount: scanResult.suppressedCount,
         baselinedCount: baselinedCount > 0 ? baselinedCount : undefined,
         scannedFiles: scanResult.scannedFiles,
+        skippedFiles: scanResult.skippedFiles,
+        ruleErrors: scanResult.ruleErrors,
         duration,
         timestamp: new Date(),
         ignoredRules: engine.getIgnoredRules(),
@@ -405,7 +413,11 @@ program
       }
 
       if (options.sarif) {
-        await new SarifReporter().writeReport(options.sarif, result.findings, engine.getAllRules(), { repoRoot, severityOverrides });
+        await new SarifReporter().writeReport(options.sarif, result.findings, engine.getAllRules(), {
+          repoRoot,
+          severityOverrides,
+          executionSuccessful: (scanResult.skippedFiles ?? 0) === 0 && (scanResult.ruleErrors?.length ?? 0) === 0,
+        });
         generatedReports.sarif = resolve(options.sarif);
       }
 
@@ -418,7 +430,12 @@ program
       reporter.report(result);
 
       const failing = result.findings.filter(f => FAIL_ON_SEVERITIES[failOn].includes(f.severity)).length;
-      if (failing > 0 && !options.writeBaseline) {
+      // Fail closed: skipped files or crashed rules mean the scan is incomplete, so it can
+      // never exit like a clean run — even with --write-baseline or --fail-on none.
+      const incomplete = (scanResult.skippedFiles ?? 0) > 0 || (scanResult.ruleErrors?.length ?? 0) > 0;
+      if (incomplete) {
+        process.exitCode = EXIT_CODES.ERROR;
+      } else if (failing > 0 && !options.writeBaseline) {
         // Set the code instead of exiting: process.exit() can cut off piped stdout (e.g. large --json output)
         process.exitCode = EXIT_CODES.HIGH_SEVERITY_FOUND;
       }
@@ -449,4 +466,3 @@ program
   });
 
 program.parse(process.argv);
-

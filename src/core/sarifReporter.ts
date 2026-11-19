@@ -29,6 +29,8 @@ export interface SarifOptions {
   repoRoot: string;
   /** Applied to rule defaults so they match the (already overridden) findings */
   severityOverrides?: Record<string, Severity>;
+  /** False when the scan was incomplete (skipped files or crashed rules); defaults to true */
+  executionSuccessful?: boolean;
 }
 
 function truncate(text: string, max: number): string {
@@ -115,7 +117,7 @@ export class SarifReporter {
             },
           },
           originalUriBaseIds: { '%SRCROOT%': { uri: rootUri.endsWith('/') ? rootUri : rootUri + '/' } },
-          invocations: [{ executionSuccessful: true }],
+          invocations: [{ executionSuccessful: options.executionSuccessful !== false }],
           results,
         },
       ],

@@ -28,6 +28,23 @@ const SEVERITY_COLORS = {
 const securityGradient = gradient(['#ff0000', '#ff6b6b']);
 const successGradient = gradient(['#00ff00', '#00cc00']);
 
+/** True when the scan could not check everything it should have (read errors or crashed rules). */
+function isIncompleteScan(result: ScanResult): boolean {
+  return (result.skippedFiles ?? 0) > 0 || (result.ruleErrors?.length ?? 0) > 0;
+}
+
+function incompleteScanReasons(result: ScanResult): string[] {
+  const reasons: string[] = [];
+  if ((result.skippedFiles ?? 0) > 0) {
+    reasons.push(`${result.skippedFiles} file(s) could not be read and were skipped`);
+  }
+  const failedRules = [...new Set((result.ruleErrors ?? []).map(e => e.ruleId))];
+  if (failedRules.length > 0) {
+    reasons.push(`${failedRules.length} rule(s) failed to execute: ${failedRules.join(', ')}`);
+  }
+  return reasons;
+}
+
 export class Reporter {
   private options: ReporterOptions;
 
@@ -211,6 +228,10 @@ export class Reporter {
   }
 
   private printSuccessReport(result: ScanResult): void {
+    if (isIncompleteScan(result)) {
+      this.printIncompleteScanReport(result);
+      return;
+    }
     const headerText = '  SECURITY SCAN COMPLETE  ';
     const box = boxen(successGradient(headerText), {
       padding: 1,
@@ -224,6 +245,28 @@ export class Reporter {
     console.log('');
     console.log(chalk.green.bold('  ✓ NO SECURITY VULNERABILITIES DETECTED'));
     console.log(chalk.green('  Your React Native app passed all 20 security checks!'));
+    console.log('');
+    this.printDetailedSummary(result);
+    this.printReportFooter(result);
+  }
+
+  /** The scan found nothing, but it did not finish cleanly: say so instead of celebrating. */
+  private printIncompleteScanReport(result: ScanResult): void {
+    const box = boxen(chalk.yellow.bold('  SECURITY SCAN INCOMPLETE  '), {
+      padding: 1,
+      margin: 1,
+      borderStyle: 'double',
+      borderColor: 'yellow',
+      backgroundColor: '#1a1a1a',
+    });
+    console.log(box);
+
+    console.log('');
+    console.log(chalk.yellow.bold('  ⚠️  SCAN DID NOT COMPLETE — RESULTS MAY BE MISSING'));
+    for (const reason of incompleteScanReasons(result)) {
+      console.log(chalk.yellow(`  • ${reason}`));
+    }
+    console.log(chalk.yellow('  Treat this scan as failed, not as clean.'));
     console.log('');
     this.printDetailedSummary(result);
     this.printReportFooter(result);
@@ -279,9 +322,20 @@ export class Reporter {
     } else if (findings.length > 0) {
       console.log(chalk.blue.bold('  ℹ️  RISK LEVEL: LOW'));
       console.log(chalk.blue('  Minor issues detected. Address as part of regular maintenance.'));
+    } else if (isIncompleteScan(result)) {
+      console.log(chalk.yellow.bold('  ⚠️  RISK LEVEL: UNKNOWN'));
+      console.log(chalk.yellow('  The scan did not complete: results may be missing. Treat it as failed, not clean.'));
     } else {
       console.log(chalk.green.bold('  ✓ RISK LEVEL: SECURE'));
       console.log(chalk.green('  No security vulnerabilities detected. Great job!'));
+    }
+
+    if (findings.length > 0 && isIncompleteScan(result)) {
+      console.log('');
+      console.log(chalk.yellow.bold('  ⚠️  SCAN INCOMPLETE — more issues may be unreported:'));
+      for (const reason of incompleteScanReasons(result)) {
+        console.log(chalk.yellow(`  • ${reason}`));
+      }
     }
     
     console.log('');

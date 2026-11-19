@@ -24,6 +24,15 @@ export interface Finding {
   fingerprint?: string;
 }
 
+/** A rule that failed to execute. A scan with rule errors is incomplete and must not look clean. */
+export interface RuleError {
+  ruleId: string;
+  /** File being scanned when the rule failed; absent for scan-level (finalize/beginScan) failures */
+  filePath?: string;
+  phase: 'beginScan' | 'apply' | 'finalize';
+  message: string;
+}
+
 export interface ScanResult {
   findings: Finding[];
   scannedFiles: number;
@@ -34,5 +43,8 @@ export interface ScanResult {
   suppressedCount?: number;
   /** Findings dropped because their fingerprint is listed in the baseline */
   baselinedCount?: number;
+  /** Files that could not be read; the scan is incomplete and must not be treated as clean */
+  skippedFiles?: number;
+  /** Rules that crashed during the scan; the scan is incomplete and must not be treated as clean */
+  ruleErrors?: RuleError[];
 }
-
