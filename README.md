@@ -371,6 +371,8 @@ rnsec scan --baseline .rnsec-baseline.json
 
 You can also set `"baseline": ".rnsec-baseline.json"` in the [config file](#configuration) (relative to the scan root). Each finding is identified by a fingerprint of the rule ID, the file path, the whitespace-normalized source line and an occurrence index, not by its line number, so findings survive code moving around. Changing the flagged line itself makes the finding show up again. The number of hidden findings is printed and stored as `baselinedCount` in the JSON result. `--write-baseline` honors `--min-confidence`.
 
+Baselines are bound to the rule versions that produced them: every entry records the rule version, and the fingerprint itself includes that version. A baseline entry only hides a finding when the rule ID and the rule version both match, so a changed rule can never have its new findings hidden by a stale acceptance. Baselines written by older rnsec releases without version binding, entries naming unknown or malformed rules, and malformed expiry dates are rejected with a clear error (fail closed) — regenerate the baseline with `--write-baseline`. An entry may carry an `expiresOn` date (`YYYY-MM-DD`); past-due entries stop hiding findings.
+
 ## Configuration
 
 rnsec supports configuration files to customize the scanning behavior. Create a `.rnsec.jsonc` or `.rnsec.json` file in your project root (rnsec looks for `.rnsec.json`, then `.rnsec.jsonc`, then `.rnsec.config.json`). The file is parsed as JSONC, so comments and trailing commas are allowed.
@@ -439,6 +441,19 @@ const key = 'AIza...'; // rnsec-ignore: API_KEY_EXPOSED restricted Firebase web 
 ```
 
 Use `<!-- rnsec-ignore: RULE_ID -->` in `AndroidManifest.xml`, `Info.plist` and other XML files, and put multiple IDs in one comment separated by commas.
+
+Suppressions are security-sensitive and validated before they are applied:
+
+- Directives are read from real comment nodes (the AST for JS/TS, comment syntax for the other file kinds). A `rnsec-ignore:` token inside a string, template literal or JSON value never suppresses anything.
+- The marker, rule IDs and versions are strict ASCII. Unicode lookalikes (homoglyphs, full-width punctuation, Cyrillic letters that resemble Latin ones) make the directive malformed rather than matching it.
+- A directive can only name a rule that exists. Unknown IDs, malformed versions, malformed expiry dates and conflicting directives on the same line **fail closed**: the finding stays reported and a warning is printed.
+- Each directive is bound to the rule version it was reviewed against. Pin it explicitly with `RULE_ID@1.0.0`; an unpinned directive binds to the current version. When a rule's version changes, older directives no longer suppress its findings.
+- An optional expiry makes an acceptance time-boxed, e.g. `// rnsec-ignore: INSECURE_HTTP_URL until=2026-12-31 tracked in SEC-123`. Expired directives fail closed.
+
+```ts
+// rnsec-ignore: INSECURE_HTTP_URL@1.0.0, WEAK_TLS_CONFIGURATION@1.0.0 until=2026-12-31 risk accepted, migration in SEC-456
+fetch('http://partner.example-corp.com/status');
+```
 
 ### Automatic Exclusions and Dev-Only Code
 

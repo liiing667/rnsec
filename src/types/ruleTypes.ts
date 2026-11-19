@@ -38,6 +38,11 @@ export interface Rule {
   severity: Severity;
   fileTypes: string[];
   apply: (context: RuleContext) => Promise<Finding[]>;
+  /**
+   * Bump when the rule's detection changes such that old suppressions/baselines
+   * must no longer apply. Defaults to `1.0.0` (see RuleRegistry).
+   */
+  version?: string;
   /** Called once before every scan (full or --changed-files): reset per-scan state here */
   beginScan?: () => void;
   /** Called once after all files of a scan were processed; findings are deduped and `rnsec-ignore`d like the others */

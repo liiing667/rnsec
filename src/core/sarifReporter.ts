@@ -5,6 +5,7 @@ import { Severity } from '../types/findings.js';
 import type { Rule } from '../types/ruleTypes.js';
 import { VERSION } from '../constants.js';
 import { relativeToRoot } from './baseline.js';
+import { RuleRegistry, DEFAULT_RULE_VERSION } from './ruleRegistry.js';
 
 const SCHEMA = 'https://json.schemastore.org/sarif-2.1.0.json';
 const INFORMATION_URI = 'https://github.com/adnxy/rnsec';
@@ -64,6 +65,7 @@ export class SarifReporter {
     const sarifRules = ruleList.map(r => {
       const suggestion = firstFinding.get(r.id)?.suggestion;
       const helpText = truncate(suggestion ? `${r.description} ${suggestion}` : r.description, MAX_TEXT);
+      const ruleVersion = RuleRegistry.shared().versionOf(r.id) ?? DEFAULT_RULE_VERSION;
       return {
         id: r.id,
         name: truncate(pascalCase(r.id), MAX_NAME),
@@ -77,27 +79,47 @@ export class SarifReporter {
         properties: {
           tags: ['security', 'react-native'],
           precision: 'medium',
+          // Bind the rule identity to its version so downstream tooling cannot
+          // match a result against an older revision of the rule.
+          version: ruleVersion,
           'security-severity': SECURITY_SEVERITY[r.severity],
         },
       };
     });
 
-    const results = findings.map(f => ({
-      ruleId: f.ruleId,
-      ruleIndex: ruleIndex.get(f.ruleId)!,
-      level: LEVEL[f.severity],
-      message: { text: f.reason ? `${f.description} ${f.reason}` : f.description },
-      locations: [
-        {
-          physicalLocation: {
-            artifactLocation: { uri: relativeToRoot(f.filePath, options.repoRoot), uriBaseId: '%SRCROOT%' },
-            region: { startLine: f.line ?? 1, startColumn: f.column ?? 1 },
+    const registry = RuleRegistry.shared();
+    const results = findings.map(f => {
+      const ruleVersion = registry.versionOf(f.ruleId) ?? DEFAULT_RULE_VERSION;
+      return {
+        ruleId: f.ruleId,
+        ruleIndex: ruleIndex.get(f.ruleId)!,
+        level: LEVEL[f.severity],
+        message: { text: f.reason ? `${f.description} ${f.reason}` : f.description },
+        locations: [
+          {
+            physicalLocation: {
+              artifactLocation: { uri: relativeToRoot(f.filePath, options.repoRoot), uriBaseId: '%SRCROOT%' },
+              region: { startLine: f.line ?? 1, startColumn: f.column ?? 1 },
+            },
           },
+        ],
+        // The fingerprint already binds ruleId + rule version + location + code;
+        // expose the version alongside it so consumers cannot re-identify a result
+        // across a rule change that invalidates the original acceptance.
+        ...(f.fingerprint
+          ? {
+              partialFingerprints: {
+                'rnsec/v1': f.fingerprint,
+                'rnsec/ruleVersion': `${f.ruleId}@${ruleVersion}`,
+              },
+            }
+          : {}),
+        properties: {
+          confidence: f.confidence ?? 'high',
+          ruleVersion,
         },
-      ],
-      ...(f.fingerprint ? { partialFingerprints: { 'rnsec/v1': f.fingerprint } } : {}),
-      properties: { confidence: f.confidence ?? 'high' },
-    }));
+      };
+    });
 
     const rootUri = pathToFileURL(options.repoRoot).href;
     return {

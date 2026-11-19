@@ -34,6 +34,7 @@ import { gradleRules } from '../scanners/android/gradleScanner.js';
 import { registryConfigRules } from '../scanners/modules/registryConfigScanner.js';
 import { credentialFileRules } from '../scanners/security/credentialFilesScanner.js';
 import { SarifReporter } from '../core/sarifReporter.js';
+import { RuleRegistry } from '../core/ruleRegistry.js';
 import { assignFingerprints, readBaseline, resolveRepoRoot, writeBaseline } from '../core/baseline.js';
 import { Severity } from '../types/findings.js';
 import type { ScanResult, Finding, Confidence } from '../types/findings.js';
@@ -342,23 +343,37 @@ program
       let findings = scanResult.findings.filter(f => CONFIDENCE_RANK[f.confidence ?? 'high'] >= CONFIDENCE_RANK[minConfidence]);
 
       if (options.writeBaseline) {
-        await writeBaseline(options.writeBaseline, findings, repoRoot);
+        await writeBaseline(options.writeBaseline, findings, repoRoot, VERSION);
         info(chalk.green(`Baseline with ${findings.length} finding(s) written to ${resolve(options.writeBaseline)}`), options.json);
       }
 
       let baselinedCount = 0;
       if (baselinePath) {
-        let known: Set<string>;
+        let known: Awaited<ReturnType<typeof readBaseline>>;
         try {
           known = await readBaseline(baselinePath);
         } catch (error) {
           fatal(error instanceof Error ? error.message : String(error));
         }
-        const remaining = findings.filter(f => !known.has(f.fingerprint!));
+        const registry = RuleRegistry.shared();
+        const byFingerprint = new Map(known.map(entry => [entry.fingerprint, entry]));
+        const remaining = findings.filter(f => {
+          const entry = byFingerprint.get(f.fingerprint!);
+          // Match only when the finding and the accepted entry share the rule AND its version.
+          if (!entry || entry.ruleId !== f.ruleId) return true;
+          if (entry.ruleVersion !== registry.versionOf(f.ruleId)) return true;
+          return false;
+        });
         baselinedCount = findings.length - remaining.length;
         findings = remaining;
         if (baselinedCount > 0 && !options.silent) {
           info(chalk.yellow(`ℹ ${baselinedCount} finding(s) hidden by baseline ${baselinePath}`), options.json);
+        }
+      }
+
+      if (!options.silent) {
+        for (const warning of engine.getSuppressionWarnings()) {
+          info(chalk.yellow(`⚠️  ${warning}`), options.json);
         }
       }
 
@@ -449,4 +464,3 @@ program
   });
 
 program.parse(process.argv);
-

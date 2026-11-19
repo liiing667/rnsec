@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Security: fail-closed suppression, baselines and SARIF identity
+
+- `rnsec-ignore` directives in JS/TS are now read from real AST comment nodes, so a marker placed in a string or template literal can no longer hide findings. Non-JS files only accept markers inside their native comment syntax, and native string literals are masked before scanning.
+- Directive markers, rule IDs and versions are matched against strict ASCII: Unicode homoglyphs and full-width punctuation make a directive malformed instead of matching.
+- Directives are bound to rule versions (`RULE_ID@1.0.0`, unpinned binds the current version), support an optional `until=YYYY-MM-DD` expiry, and unknown rule IDs, malformed versions/dates, expired or conflicting directives fail closed (the finding stays reported and a warning is printed).
+- Baseline entries now record the rule version, fingerprints include that version, and an entry only hides a finding when rule ID and version both match. Legacy baselines without version binding, malformed fingerprints/rules/expiries are rejected with a clear error; expired entries stop hiding findings.
+- SARIF results expose `rnsec/ruleVersion` partial fingerprints and per-result/per-rule version properties so identities cannot be re-matched across a rule change.
+
+---
+
 ## [1.4.0] - 2026-10-23
 
 ### New rules, CI features and far fewer false positives

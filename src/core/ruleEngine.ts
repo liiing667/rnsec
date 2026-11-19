@@ -11,6 +11,7 @@ import { resolveAndroidTargetSdk } from '../utils/androidSdk.js';
 import { languageForPath } from '../utils/nativeCode.js';
 import { collectNativeDevOnlyRanges } from '../utils/nativeGuards.js';
 import { parseSuppressions, isSuppressed } from '../utils/suppression.js';
+import { RuleRegistry } from './ruleRegistry.js';
 
 /**
  * Rules that describe the same underlying problem from different angles. When
@@ -59,6 +60,8 @@ export class RuleEngine {
   private excludedPaths: string[] = [];
   private rootDir: string | undefined;
   private suppressedCount: number = 0;
+  /** Directive problems that made suppressions fail closed during the last scan. */
+  private suppressionWarnings: string[] = [];
   private projectInfo: ProjectInfo | undefined;
   private respectGitignore = true;
 
@@ -76,6 +79,7 @@ export class RuleEngine {
    */
   registerRuleGroup(group: RuleGroup): void {
     this.ruleGroups.push(group);
+    RuleRegistry.shared().register(group.rules);
   }
 
   /**
@@ -118,6 +122,11 @@ export class RuleEngine {
     return this.ruleGroups.flatMap(group => group.rules).filter(rule => !this.ignoredRules.has(rule.id));
   }
 
+  /** Warnings collected while parsing `rnsec-ignore` directives in the latest scan. */
+  getSuppressionWarnings(): string[] {
+    return this.suppressionWarnings;
+  }
+
   /**
    * Run all registered rules on specific files
    * @param filePaths - Array of specific file paths to scan
@@ -133,6 +142,7 @@ export class RuleEngine {
     const allFindings: Finding[] = [];
     this.skippedFiles = 0;
     this.suppressedCount = 0;
+    this.suppressionWarnings = [];
     this.rootDir = rootDir ? resolve(rootDir) : undefined;
     this.projectInfo = await this.loadProjectInfo();
     this.beginScan();
@@ -190,10 +200,11 @@ export class RuleEngine {
           if (!suppressionCache.has(finding.filePath)) {
             suppressionCache.set(
               finding.filePath,
-              await readFileContent(finding.filePath).then(parseSuppressions, () => null)
+              await readFileContent(finding.filePath).then(content => parseSuppressions(content, finding.filePath), () => null)
             );
           }
           const map = suppressionCache.get(finding.filePath);
+          if (map) this.collectSuppressionWarnings(map);
           if (map && isSuppressed(map, finding.ruleId, finding.line)) {
             this.suppressedCount++;
             continue;
@@ -219,6 +230,7 @@ export class RuleEngine {
     const allFindings: Finding[] = [];
     this.skippedFiles = 0;
     this.suppressedCount = 0;
+    this.suppressionWarnings = [];
     this.rootDir = resolve(rootDir);
     this.projectInfo = await this.loadProjectInfo();
     this.beginScan();
@@ -321,7 +333,8 @@ export class RuleEngine {
     const devRanges = context.language
       ? collectNativeDevOnlyRanges(fileContent, context.language)
       : collectDevOnlyRanges(context.ast);
-    const suppressions = parseSuppressions(fileContent);
+    const suppressions = parseSuppressions(fileContent, context.filePath);
+    this.collectSuppressionWarnings(suppressions);
 
     return findings.filter(finding => {
       // path-level, for every rule: findings in tests, vendored code and Android debug source sets never ship
@@ -333,6 +346,13 @@ export class RuleEngine {
       }
       return true;
     });
+  }
+
+  /** Record malformed/expired/conflicting directive problems once per source line. */
+  private collectSuppressionWarnings(map: ReturnType<typeof parseSuppressions>): void {
+    for (const warning of map.warnings) {
+      if (!this.suppressionWarnings.includes(warning.message)) this.suppressionWarnings.push(warning.message);
+    }
   }
 
   /**
